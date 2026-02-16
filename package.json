@@ -1,0 +1,10 @@
+{
+  "name": "taskflow-backend",
+  "version": "1.0.0",
+  "description": "Backend API for TaskFlow task manager",
+  "main": "api/categorize.js",
+  "engines": {
+    "node": ">=18.x"
+  },
+  "dependencies": {}
+}

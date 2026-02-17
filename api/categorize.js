@@ -1,110 +1,241 @@
-// Backend API endpoint for task categorization
-// Deployed on Vercel as serverless function
+// TaskFlow Backend - Upstash Redis for persistent context storage
+// Uses Upstash REST API directly (no SDK needed)
+
+const KV_URL = process.env.UPSTASH_REDIS_REST_URL || process.env.KV_REST_API_URL;
+const KV_TOKEN = process.env.UPSTASH_REDIS_REST_TOKEN || process.env.KV_REST_API_TOKEN;
+
+// Simple Upstash REST client
+const kv = {
+  get: async (key) => {
+    const r = await fetch(`${KV_URL}/get/${encodeURIComponent(key)}`, {
+      headers: { Authorization: `Bearer ${KV_TOKEN}` }
+    });
+    const data = await r.json();
+    if (data.result === null || data.result === undefined) return null;
+    try { return JSON.parse(data.result); } catch(e) { return data.result; }
+  },
+  set: async (key, value) => {
+    const r = await fetch(`${KV_URL}/set/${encodeURIComponent(key)}`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${KV_TOKEN}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ value: JSON.stringify(value) })
+    });
+    return await r.json();
+  }
+};
 
 export default async function handler(req, res) {
-  // Enable CORS
   res.setHeader('Access-Control-Allow-Credentials', true);
   res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,PATCH,DELETE,POST,PUT');
-  res.setHeader(
-    'Access-Control-Allow-Headers',
-    'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version'
-  );
+  res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS,POST,PUT');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
 
-  // Handle preflight
-  if (req.method === 'OPTIONS') {
-    res.status(200).end();
-    return;
+  if (req.method === 'OPTIONS') { res.status(200).end(); return; }
+
+  const path = req.url?.split('?')[0];
+
+  // GET /api/context
+  if (req.method === 'GET' && path === '/api/context') {
+    try {
+      const context = await kv.get('taskflow:context') || {};
+      const corrections = await kv.get('taskflow:corrections') || [];
+      const people = await kv.get('taskflow:people') || [];
+      const projects = await kv.get('taskflow:projects') || [];
+      return res.status(200).json({ context, corrections, people, projects });
+    } catch(e) {
+      console.error('GET context error:', e);
+      return res.status(500).json({ error: e.message });
+    }
+  }
+
+  // PUT /api/context
+  if (req.method === 'PUT' && path === '/api/context') {
+    try {
+      const { context, people, projects } = req.body;
+      if (context !== undefined) await kv.set('taskflow:context', context);
+      if (people !== undefined) await kv.set('taskflow:people', people);
+      if (projects !== undefined) await kv.set('taskflow:projects', projects);
+      return res.status(200).json({ success: true });
+    } catch(e) {
+      console.error('PUT context error:', e);
+      return res.status(500).json({ error: e.message });
+    }
+  }
+
+  // POST /api/correction
+  if (req.method === 'POST' && path === '/api/correction') {
+    try {
+      const { original, corrected, taskText } = req.body;
+      const corrections = await kv.get('taskflow:corrections') || [];
+      const updated = [{
+        taskText,
+        original,
+        corrected,
+        timestamp: new Date().toISOString()
+      }, ...corrections].slice(0, 100);
+      await kv.set('taskflow:corrections', updated);
+      return res.status(200).json({ success: true });
+    } catch(e) {
+      console.error('POST correction error:', e);
+      return res.status(500).json({ error: e.message });
+    }
   }
 
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
+  // POST /api/categorize
   try {
-    const { taskText, existingLists, apiKey } = req.body;
+    const { taskText, existingLists, apiKey, context: reqContext, mode } = req.body;
 
-    if (!taskText) {
-      return res.status(400).json({ error: 'taskText is required' });
+    if (!taskText) return res.status(400).json({ error: 'taskText is required' });
+    if (!apiKey) return res.status(400).json({ error: 'apiKey is required' });
+
+    const safeText = String(taskText).slice(0, 1000);
+
+    // Load stored context from Upstash
+    let storedContext = {};
+    let corrections = [];
+    let people = [];
+    let projects = [];
+
+    if (KV_URL && KV_TOKEN) {
+      try {
+        [storedContext, corrections, people, projects] = await Promise.all([
+          kv.get('taskflow:context').then(r => r || {}),
+          kv.get('taskflow:corrections').then(r => r || []),
+          kv.get('taskflow:people').then(r => r || []),
+          kv.get('taskflow:projects').then(r => r || [])
+        ]);
+      } catch(e) {
+        console.warn('KV read failed, continuing without stored context:', e.message);
+      }
     }
 
-    if (!apiKey) {
-      return res.status(400).json({ error: 'apiKey is required' });
+    // Merge stored + request context
+    const context = { ...storedContext, ...(reqContext || {}) };
+
+    // Build context string for AI
+    const contextParts = [];
+
+    if (context.role) contextParts.push(`User's role: ${context.role}`);
+
+    if (people.length > 0) {
+      contextParts.push(`Team members:\n${people.map(p =>
+        `- ${p.name}${p.role ? ` (${p.role})` : ''}${p.keywords ? ` | Keywords: ${p.keywords}` : ''}`
+      ).join('\n')}`);
+    } else if (context.team) {
+      contextParts.push(`Team members:\n${context.team}`);
     }
 
-    const hasExistingLists = existingLists && (
-      existingLists.people?.length > 0 || 
-      existingLists.projects?.length > 0 || 
+    if (projects.length > 0) {
+      contextParts.push(`Active projects:\n${projects.map(p =>
+        `- ${p.name}${p.keywords ? ` | Keywords: ${p.keywords}` : ''}`
+      ).join('\n')}`);
+    } else if (context.projects) {
+      contextParts.push(`Active projects:\n${context.projects}`);
+    }
+
+    if (context.rules) contextParts.push(`Custom rules:\n${context.rules}`);
+
+    // Include recent corrections as AI learning examples
+    if (corrections.length > 0) {
+      contextParts.push(`Learning from past corrections (use these patterns):\n${corrections.slice(0, 25).map(c =>
+        `- "${c.taskText}" → ${c.corrected.category}/${c.corrected.listName}`
+      ).join('\n')}`);
+    }
+
+    const contextStr = contextParts.join('\n\n');
+
+    // Email draft mode
+    if (mode === 'email') {
+      const response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
+        body: JSON.stringify({
+          model: 'gpt-4o-mini',
+          messages: [
+            {
+              role: 'system',
+              content: `You are a professional email drafting assistant.\n\n${contextStr ? `Context:\n${contextStr}\n\n` : ''}Write a concise professional email. Return ONLY valid JSON with fields "subject" (string) and "body" (string). No markdown, no code blocks.`
+            },
+            { role: 'user', content: safeText }
+          ],
+          temperature: 0.7,
+          max_tokens: 600
+        })
+      });
+
+      if (!response.ok) {
+        const err = await response.json();
+        return res.status(response.status).json({ error: err.error?.message || 'OpenAI error' });
+      }
+
+      const data = await response.json();
+      const content = data.choices[0].message.content.trim().replace(/```json\n?|\n?```/g, '');
+      try {
+        return res.status(200).json(JSON.parse(content));
+      } catch(e) {
+        return res.status(200).json({ subject: 'Follow up', body: content });
+      }
+    }
+
+    // Categorization mode
+    const hasExisting = existingLists && (
+      existingLists.people?.length > 0 ||
+      existingLists.projects?.length > 0 ||
       existingLists.actions?.length > 0
     );
 
-    const systemPrompt = `You are a task categorization assistant. Analyze the user's task and return ONLY valid JSON with this structure:
+    const systemPrompt = `You are a task categorization assistant for a busy professional.
+${contextStr ? `\nIMPORTANT CONTEXT:\n${contextStr}\n` : ''}
+${hasExisting ? `\nEXISTING LISTS - match these before creating new ones:
+${existingLists.people?.length > 0 ? `People: ${existingLists.people.join(', ')}` : ''}
+${existingLists.projects?.length > 0 ? `Projects: ${existingLists.projects.join(', ')}` : ''}
+${existingLists.actions?.length > 0 ? `Actions: ${existingLists.actions.join(', ')}` : ''}
+Match flexibly - "talk to dom" → "Dom", "IL meeting" → "IL Expansion" etc.
+` : ''}
+Return ONLY valid JSON (no markdown, no code blocks):
 {
   "category": "people" | "projects" | "actions",
-  "listName": "specific person name, project name, or 'Personal Actions'",
-  "text": "cleaned up task text",
-  "tags": ["waiting", "follow-up", "action", "to-contact", "urgent"] (array of applicable tags),
+  "listName": "exact person/project name or 'Personal Actions'",
+  "text": "cleaned task text",
+  "tags": ["urgent"|"waiting"|"follow-up"|"action"|"to-contact"],
   "dueDate": "YYYY-MM-DD or null"
 }
 
-${hasExistingLists ? `IMPORTANT: The user has these existing lists. ALWAYS try to match one of these before creating new ones:
-${existingLists.people?.length > 0 ? `- People: ${existingLists.people.join(', ')}` : ''}
-${existingLists.projects?.length > 0 ? `- Projects/Meetings: ${existingLists.projects.join(', ')}` : ''}
-${existingLists.actions?.length > 0 ? `- Actions: ${existingLists.actions.join(', ')}` : ''}
-
-Match names flexibly (e.g., "Shane" matches "shane", "talk to shane", etc.). Only create a new list if the task clearly refers to a different person/project.
-` : ''}
-Guidelines:
-- If mentioning a person's name (talk to X, ask X, email X), use category "people" and listName as their name
-- If mentioning a meeting, project, or initiative, use category "projects" and listName as the meeting/project name
-- If it's a personal action without a specific person/meeting context, use category "actions" and listName "Personal Actions"
-- Extract any date mentions and convert to YYYY-MM-DD format
-- Apply relevant tags based on context
-- Clean up the text while preserving meaning`;
+Rules:
+- Person mentioned → category: "people", listName: their name
+- Meeting/project → category: "projects"
+- Otherwise → category: "actions", listName: "Personal Actions"
+- Extract any dates, add relevant tags, clean up text`;
 
     const response = await fetch('https://api.openai.com/v1/chat/completions', {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`
-      },
+      headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
       body: JSON.stringify({
         model: 'gpt-4o-mini',
         messages: [
-          {
-            role: 'system',
-            content: systemPrompt
-          },
-          {
-            role: 'user',
-            content: taskText
-          }
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: safeText }
         ],
-        temperature: 0.3,
-        max_tokens: 200
+        temperature: 0.2,
+        max_tokens: 250
       })
     });
 
     if (!response.ok) {
-      const error = await response.json();
-      return res.status(response.status).json({ 
-        error: error.error?.message || 'OpenAI API call failed' 
-      });
+      const err = await response.json();
+      return res.status(response.status).json({ error: err.error?.message || 'OpenAI error' });
     }
 
     const data = await response.json();
-    const content = data.choices[0].message.content.trim();
-    
-    // Remove markdown code blocks if present
-    const cleanContent = content.replace(/```json\n?|\n?```/g, '');
-    const categorized = JSON.parse(cleanContent);
-
-    return res.status(200).json(categorized);
+    const content = data.choices[0].message.content.trim().replace(/```json\n?|\n?```/g, '');
+    return res.status(200).json(JSON.parse(content));
 
   } catch (error) {
-    console.error('Categorization error:', error);
-    return res.status(500).json({ 
-      error: error.message || 'Internal server error' 
-    });
+    console.error('Handler error:', error);
+    return res.status(500).json({ error: error.message || 'Internal server error' });
   }
 }

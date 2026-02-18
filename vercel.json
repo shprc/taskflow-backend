@@ -4,12 +4,20 @@
     {
       "src": "api/categorize.js",
       "use": "@vercel/node"
+    },
+    {
+      "src": "api/chatgpt-briefing.js",
+      "use": "@vercel/node"
     }
   ],
   "routes": [
     {
       "src": "/api/categorize",
       "dest": "/api/categorize.js"
+    },
+    {
+      "src": "/api/chatgpt-briefing",
+      "dest": "/api/chatgpt-briefing.js"
     }
   ]
 }

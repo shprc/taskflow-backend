@@ -36,8 +36,8 @@ function formatTasksForPrompt(tasks) {
     const duePart = t.due_date
       ? `due ${t.due_date}${overdue ? ` (OVERDUE ${overdue}d)` : ''}`
       : 'no due date';
-    const assignee = t.assigned_to ? `assigned to ${t.assigned_to}` : 'unassigned';
-    return `${i + 1}. [${t.priority?.toUpperCase() || 'NORMAL'}] ${t.title} | ${t.category || 'Uncategorized'} | ${duePart} | ${assignee} | status: ${t.status || 'open'}`;
+    const statusPart = t.completed ? 'completed' : 'open';
+    return `${i + 1}. [${t.priority?.toUpperCase() || 'NORMAL'}] ${t.text} | ${t.category || 'Uncategorized'} | ${duePart} | status: ${statusPart}`;
   }).join('\n');
 }
 
@@ -60,15 +60,14 @@ export default async function handler(req, res) {
     } = req.body;
 
     // ── 1. Fetch tasks from Supabase ──────────────────────────
-    let query = supabase
-      .from('tf_tasks')
-      .select('*')
-      .neq('status', 'completed')
-      .order('created_at', { ascending: false });
+   let query = supabase
+  .from('tf_tasks')
+  .select('*')
+  .eq('completed', false)
+  .eq('is_archived', false)
+  .order('created_at', { ascending: false });
 
-    if (user_id) query = query.eq('user_id', user_id);
-    if (filters.list_id) query = query.eq('list_id', filters.list_id);
-    if (filters.assigned_to) query = query.eq('assigned_to', filters.assigned_to);
+if (filters.list_name) query = query.eq('list_name', filters.list_name);
 
     const { data: tasks, error: dbError } = await query;
     if (dbError) throw new Error(`Supabase error: ${dbError.message}`);

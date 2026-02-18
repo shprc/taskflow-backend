@@ -1,193 +1,204 @@
-# TaskFlow ChatGPT Integration — Setup Guide
+// ============================================================
+// TaskFlow ChatGPT Integration - Backend Endpoint
+// File: api/chatgpt-briefing.js (add to your Vercel backend)
+// ============================================================
 
-## What This Adds
-- **Daily Briefing**: ChatGPT reads your open tasks and generates a sharp, executive-style morning brief (focus, risks, pipeline, recommendation)
-- **Prioritize Tasks**: ChatGPT scores and reorders your tasks by urgency with one-line reasoning per item
-- Optional context field: "I have a board meeting at 2pm" shapes the AI output
+import { createClient } from '@supabase/supabase-js';
+import OpenAI from 'openai';
 
----
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
 
-## File Inventory
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
 
-| File | Destination |
-|------|-------------|
-| `taskflow-chatgpt-backend.js` | Your Vercel backend → `api/chatgpt-briefing.js` |
-| `taskflow-chatgpt-frontend.js` | Add as `<script>` or paste inline in your main HTML |
+// ── Helpers ──────────────────────────────────────────────────
 
----
-
-## Step 1 — Backend: Add the API Endpoint
-
-### 1a. Copy the file
-```
-taskflow-chatgpt-backend.js → your-backend-repo/api/chatgpt-briefing.js
-```
-
-### 1b. Verify your Vercel environment variables
-Your backend already has these (used by existing AI categorization) — confirm:
-```
-OPENAI_API_KEY=sk-...
-SUPABASE_URL=https://xxxx.supabase.co
-SUPABASE_SERVICE_KEY=eyJ...   ← service role key (not anon)
-```
-
-### 1c. Check your Supabase tasks table columns
-The endpoint reads these columns — confirm they exist in your `tasks` table:
-```
-id, title, status, priority, category, due_date, assigned_to, created_at, user_id, list_id
-```
-If any are named differently, update the `SELECT` query and `formatTasksForPrompt()` in the backend file.
-
-### 1d. Test the endpoint
-```bash
-curl -X POST https://taskflow-backend-gamma.vercel.app/api/chatgpt-briefing \
-  -H "Content-Type: application/json" \
-  -d '{"mode": "briefing", "user_id": "YOUR_USER_ID"}'
-```
-Expected response shape:
-```json
-{
-  "mode": "briefing",
-  "task_count": 12,
-  "briefing": "**🎯 TODAY'S FOCUS**\n...",
-  "generated_at": "2025-02-17T...",
-  "model": "gpt-4o-mini"
+function getTodayStr() {
+  return new Date().toISOString().split('T')[0];
 }
-```
 
----
+function getDaysOverdue(dueDateStr) {
+  if (!dueDateStr) return null;
+  const due = new Date(dueDateStr);
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const diff = Math.floor((today - due) / (1000 * 60 * 60 * 24));
+  return diff > 0 ? diff : null;
+}
 
-## Step 2 — Frontend: Wire Up the Panel
+function formatTasksForPrompt(tasks) {
+  return tasks.map((t, i) => {
+    const overdue = getDaysOverdue(t.due_date);
+    const duePart = t.due_date
+      ? `due ${t.due_date}${overdue ? ` (OVERDUE ${overdue}d)` : ''}`
+      : 'no due date';
+    const assignee = t.assigned_to ? `assigned to ${t.assigned_to}` : 'unassigned';
+    return `${i + 1}. [${t.priority?.toUpperCase() || 'NORMAL'}] ${t.title} | ${t.category || 'Uncategorized'} | ${duePart} | ${assignee} | status: ${t.status || 'open'}`;
+  }).join('\n');
+}
 
-### 2a. Since you're using standalone HTML (no build step), paste inline:
+// ── Main Handler ─────────────────────────────────────────────
 
-In your main `index.html`, before the closing `</body>`:
+export default async function handler(req, res) {
+  // CORS
+  res.setHeader('Access-Control-Allow-Origin', '*');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') return res.status(200).end();
+  if (req.method !== 'POST') return res.status(405).json({ error: 'Method not allowed' });
 
-```html
-<!-- Paste the full contents of taskflow-chatgpt-frontend.js here,
-     removing the ES module export line at the bottom -->
-```
+  try {
+    const {
+      mode = 'briefing',       // 'briefing' | 'prioritize' | 'both'
+      user_id,
+      filters = {},            // { list_id, assigned_to, status }
+      custom_context = '',     // e.g. "I have a board meeting at 2pm today"
+    } = req.body;
 
-Or if you have a scripts folder:
-```html
-<script src="/scripts/chatgpt-panel.js"></script>
-```
+    // ── 1. Fetch tasks from Supabase ──────────────────────────
+    let query = supabase
+      .from('tasks')
+      .select('*')
+      .neq('status', 'completed')
+      .order('created_at', { ascending: false });
 
-### 2b. Initialize the panel in your app's DOMContentLoaded / init function:
+    if (user_id) query = query.eq('user_id', user_id);
+    if (filters.list_id) query = query.eq('list_id', filters.list_id);
+    if (filters.assigned_to) query = query.eq('assigned_to', filters.assigned_to);
 
-```javascript
-// After your existing app init code:
+    const { data: tasks, error: dbError } = await query;
+    if (dbError) throw new Error(`Supabase error: ${dbError.message}`);
+    if (!tasks || tasks.length === 0) {
+      return res.json({
+        mode,
+        task_count: 0,
+        briefing: "You have no open tasks right now. Enjoy the calm!",
+        prioritized_tasks: [],
+        priority_reasoning: "No tasks to prioritize.",
+        generated_at: new Date().toISOString(),
+      });
+    }
 
-const chatGPTPanel = new ChatGPTPanel({
-  backendUrl: BACKEND_URL  // your existing BACKEND_URL global
-});
+    const today = getTodayStr();
+    const taskList = formatTasksForPrompt(tasks);
 
-// Add trigger button to your header/toolbar:
-const triggerBtn = createChatGPTTriggerButton(chatGPTPanel);
-document.querySelector('#header-actions').appendChild(triggerBtn);
-// Adjust the selector to match your actual toolbar element
-```
+    // ── 2. Build prompt based on mode ─────────────────────────
+    const systemPrompt = `You are a sharp, direct executive assistant embedded in TaskFlow, a task management app used by professionals in the cannabis/hemp beverage industry. 
+Your job is to help the user cut through noise and focus on what truly matters today.
+Be concise, specific, and actionable. Never pad responses. Today's date is ${today}.`;
 
-### 2c. If you want to open it from an existing button instead:
+    let userPrompt = '';
 
-```javascript
-document.querySelector('#your-existing-btn').addEventListener('click', () => {
-  chatGPTPanel.show(currentUser?.id);
-});
-```
+    if (mode === 'prioritize' || mode === 'both') {
+      userPrompt += `
+## TASK PRIORITIZATION REQUEST
 
----
+Here are the user's current open tasks:
+${taskList}
 
-## Step 3 — Remove the ES module export (for standalone HTML)
+${custom_context ? `Additional context from user: "${custom_context}"` : ''}
 
-At the bottom of the frontend file, remove or comment out:
-```javascript
-export { ChatGPTPanel, createChatGPTTriggerButton };
-```
-This line is only needed if you're using a bundler.
+Return a JSON response with this exact structure:
+{
+  "prioritized_tasks": [
+    {
+      "original_index": <1-based number matching the task list above>,
+      "title": "<task title>",
+      "priority_score": <1-100, higher = more urgent>,
+      "urgency_label": "CRITICAL" | "HIGH" | "MEDIUM" | "LOW",
+      "reason": "<1 sentence why this rank>"
+    }
+  ],
+  "priority_reasoning": "<2-3 sentence overall summary of your prioritization logic>"
+}
 
----
+Sort by priority_score descending. Only include the top 10 tasks if there are more than 10.
+`;
+    }
 
-## Step 4 — Optional: Pass Filters
+    if (mode === 'briefing' || mode === 'both') {
+      userPrompt += `
+## DAILY BRIEFING REQUEST
 
-The backend supports optional filters if you want to scope the briefing:
+Here are the user's current open tasks:
+${taskList}
 
-```javascript
-// Only briefing tasks from a specific list:
-const result = await fetch(`${BACKEND_URL}/api/chatgpt-briefing`, {
-  method: 'POST',
-  headers: { 'Content-Type': 'application/json' },
-  body: JSON.stringify({
-    mode: 'briefing',
-    user_id: currentUser.id,
-    filters: { list_id: 'abc123' },
-    custom_context: 'Focus on GTI-related tasks'
-  })
-});
-```
+${custom_context ? `Additional context from user: "${custom_context}"` : ''}
 
----
+Write a sharp, executive-style daily briefing. Structure it as:
 
-## How It Works (Architecture)
+**🎯 TODAY'S FOCUS** (2-3 most important tasks to complete today, with one sentence why each matters)
 
-```
-User clicks "Generate Briefing"
-        │
-        ▼
-Frontend (taskflow-frontend-lime.vercel.app)
-  POST /api/chatgpt-briefing
-        │
-        ▼
-Backend (taskflow-backend-gamma.vercel.app)
-  1. Fetches open tasks from Supabase
-  2. Formats them into a structured prompt
-  3. Sends to gpt-4o-mini with mode-specific instructions
-  4. Returns parsed result
-        │
-        ▼
-Frontend renders:
-  - Daily Briefing: Markdown-formatted narrative
-  - Prioritize: Ranked list with urgency badges + reasoning
-```
+**⚠️ NEEDS ATTENTION** (overdue items or things at risk of slipping — be specific)
 
----
+**📋 YOUR PIPELINE** (brief overview of what's queued up beyond today)
 
-## Cost Estimate
+**💡 RECOMMENDATION** (one tactical suggestion for the day — e.g., delegate X, block time for Y, etc.)
 
-| Scenario | Tokens | Cost (gpt-4o-mini) |
-|----------|--------|---------------------|
-| 20 tasks, briefing | ~800 in / ~300 out | ~$0.0003 |
-| 50 tasks, prioritize | ~1800 in / ~600 out | ~$0.0007 |
+Keep the entire briefing under 250 words. Be direct and professional. No filler phrases.
+`;
+    }
 
-Daily usage for one user ≈ **< $0.01/day**
+    // ── 3. Call OpenAI ────────────────────────────────────────
+    const isJsonMode = mode === 'prioritize'; // Only pure prioritize returns JSON
 
----
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4o-mini',
+      messages: [
+        { role: 'system', content: systemPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+      temperature: 0.4,
+      max_tokens: 1200,
+      ...(isJsonMode ? { response_format: { type: 'json_object' } } : {}),
+    });
 
-## Troubleshooting
+    const rawResponse = completion.choices[0].message.content;
 
-**"No tasks returned"** — Check that `user_id` matches what's stored in Supabase. Log `req.body.user_id` and compare to your `tasks.user_id` column.
+    // ── 4. Parse and return ───────────────────────────────────
+    let result = {
+      mode,
+      task_count: tasks.length,
+      generated_at: new Date().toISOString(),
+      model: 'gpt-4o-mini',
+    };
 
-**CORS error** — The backend sets `Access-Control-Allow-Origin: *`. If still failing, check your Vercel backend's existing CORS middleware isn't overriding it.
+    if (mode === 'prioritize') {
+      const parsed = JSON.parse(rawResponse);
+      result.prioritized_tasks = parsed.prioritized_tasks || [];
+      result.priority_reasoning = parsed.priority_reasoning || '';
+    } else if (mode === 'briefing') {
+      result.briefing = rawResponse;
+    } else if (mode === 'both') {
+      // Try to extract JSON block if present, otherwise split
+      const jsonMatch = rawResponse.match(/```json\n([\s\S]*?)\n```/);
+      if (jsonMatch) {
+        try {
+          const parsed = JSON.parse(jsonMatch[1]);
+          result.prioritized_tasks = parsed.prioritized_tasks || [];
+          result.priority_reasoning = parsed.priority_reasoning || '';
+          result.briefing = rawResponse.replace(jsonMatch[0], '').trim();
+        } catch {
+          result.briefing = rawResponse;
+          result.prioritized_tasks = [];
+        }
+      } else {
+        result.briefing = rawResponse;
+        result.prioritized_tasks = [];
+      }
+    }
 
-**OpenAI 429 rate limit** — gpt-4o-mini has generous limits; this is unlikely. If it happens, add a simple retry in the backend.
+    return res.json(result);
 
-**Briefing too generic** — Add more context in the optional context field. You can also edit the system prompt in the backend to include your industry specifics (it already mentions hemp/cannabis).
-
----
-
-## Next Phase: Real-Time Sync (your #2 priority)
-
-Once this is wired up, the next recommended step is switching from load-only sync to Supabase Realtime. The key change:
-
-```javascript
-// Replace your current fetch-on-load pattern with:
-const subscription = supabase
-  .channel('tasks')
-  .on('postgres_changes', 
-    { event: '*', schema: 'public', table: 'tasks' }, 
-    (payload) => { updateTaskInUI(payload); }
-  )
-  .subscribe();
-```
-
-This keeps all devices in sync without polling and sets up a clean foundation for collaborative features.
+  } catch (err) {
+    console.error('ChatGPT briefing error:', err);
+    return res.status(500).json({
+      error: 'Failed to generate briefing',
+      details: err.message,
+    });
+  }
+}

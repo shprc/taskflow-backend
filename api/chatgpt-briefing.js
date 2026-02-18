@@ -54,20 +54,19 @@ export default async function handler(req, res) {
   try {
     const {
       mode = 'briefing',       // 'briefing' | 'prioritize' | 'both'
-      user_id,
-      filters = {},            // { list_id, assigned_to, status }
+      filters = {},            // { list_name }
       custom_context = '',     // e.g. "I have a board meeting at 2pm today"
     } = req.body;
 
     // ── 1. Fetch tasks from Supabase ──────────────────────────
-   let query = supabase
-  .from('tf_tasks')
-  .select('*')
-  .eq('completed', false)
-  .eq('is_archived', false)
-  .order('created_at', { ascending: false });
+    let query = supabase
+      .from('tf_tasks')
+      .select('*')
+      .eq('completed', false)
+      .eq('is_archived', false)
+      .order('created_at', { ascending: false });
 
-if (filters.list_name) query = query.eq('list_name', filters.list_name);
+    if (filters.list_name) query = query.eq('list_name', filters.list_name);
 
     const { data: tasks, error: dbError } = await query;
     if (dbError) throw new Error(`Supabase error: ${dbError.message}`);

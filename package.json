@@ -6,5 +6,8 @@
   "engines": {
     "node": ">=18.x"
   },
-  "dependencies": {}
+  "dependencies": {
+    "@supabase/supabase-js": "^2.39.0",
+    "openai": "^4.20.0"
+  }
 }

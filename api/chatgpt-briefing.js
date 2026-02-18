@@ -61,7 +61,7 @@ export default async function handler(req, res) {
 
     // ── 1. Fetch tasks from Supabase ──────────────────────────
     let query = supabase
-      .from('tasks')
+      .from('tf_tasks')
       .select('*')
       .neq('status', 'completed')
       .order('created_at', { ascending: false });

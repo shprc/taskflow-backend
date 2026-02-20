@@ -20,7 +20,7 @@ module.exports = async (req, res) => {
       id: r.id,
       text: r.text,
       category: r.category || 'actions',
-      listName: r.list_name || r.list || 'Personal Actions',  // fixed fallback
+      listName: (r.list_name && r.list_name !== 'actions') ? r.list_name : (r.list && r.list !== 'actions') ? r.list : 'Personal Actions',
       tags: r.tags || [],
       dueDate: r.due_date,
       priority: r.priority || 'none',
@@ -41,8 +41,8 @@ module.exports = async (req, res) => {
       user_id: userId,
       text: t.text,
       category: t.category || 'actions',
-      list_name: t.listName || 'Personal Actions',  // fixed fallback
-      list: t.listName || 'Personal Actions',        // fixed fallback
+      list_name: (t.listName && t.listName !== 'actions') ? t.listName : (t.category === 'people' ? 'Team' : t.category === 'projects' ? 'General' : 'Personal Actions'),
+      list: (t.listName && t.listName !== 'actions') ? t.listName : (t.category === 'people' ? 'Team' : t.category === 'projects' ? 'General' : 'Personal Actions'),
       tags: t.tags || [],
       due_date: t.dueDate || null,
       priority: t.priority || 'none',

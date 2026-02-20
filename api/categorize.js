@@ -22,13 +22,13 @@ module.exports = async (req, res) => {
   const userId = await requireSession(req, res);
   if (!userId) return;
 
-  const { text, lists, context } = req.body;
+  const { text, lists, existingLists, context } = req.body;
   if (!text) return res.status(400).json({ error: 'text required' });
 
   const apiKey = await getOpenAIKey(userId);
   if (!apiKey) return res.status(500).json({ error: 'No AI API key configured' });
 
-  const listContext = lists ? `Available lists: ${JSON.stringify(lists)}` : '';
+  const listContext = (existingLists || lists) ? `Available lists: ${JSON.stringify(existingLists || lists)}` : '';
   const userContext = context ? `User context: ${context}` : '';
 
   const prompt = `You are a task categorizer for a task management app.

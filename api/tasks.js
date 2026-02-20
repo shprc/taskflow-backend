@@ -39,11 +39,24 @@ export default async function handler(req, res) {
       .order('created_at', { ascending: true });
     if (error) return res.status(500).json({ error: error.message });
 
+    // Infer category from list name for old rows that have null category
+    const inferCategory = (r) => {
+      if (r.category) return r.category;
+      const name = (r.list_name || r.list || '').toLowerCase();
+      if (name.includes('dom') || name.includes('ben') || name.includes('jen') ||
+          name.includes('shane') || name.includes('shan') || name.includes('todd') ||
+          name.includes('people') || name.includes('person') || name.includes('team')) return 'people';
+      if (name.includes('project') || name.includes('meeting') || name.includes('launch') ||
+          name.includes('breakthru') || name.includes('leadership') || name.includes('board') ||
+          name.includes('spirit') || name.includes('oglesby') || name.includes('texas')) return 'projects';
+      return 'actions';
+    };
+
     // Normalize rows back to frontend shape
     const tasks = (data || []).filter(r => !r.is_archived).map(r => ({
       id:           r.id,
       text:         r.text,
-      category:     r.category     || 'actions',
+      category:     inferCategory(r),
       listName:     r.list_name    || r.list || 'Personal Actions',
       tags:         r.tags         || [],
       dueDate:      r.due_date     || null,
@@ -57,7 +70,7 @@ export default async function handler(req, res) {
     const archived = (data || []).filter(r => r.is_archived).map(r => ({
       id:           r.id,
       text:         r.text,
-      category:     r.category     || 'actions',
+      category:     inferCategory(r),
       listName:     r.list_name    || r.list || 'Personal Actions',
       tags:         r.tags         || [],
       dueDate:      r.due_date     || null,

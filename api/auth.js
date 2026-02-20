@@ -25,7 +25,7 @@ module.exports = async (req, res) => {
   const { pin, username } = req.body;
   if (!pin) return res.status(400).json({ error: 'PIN required' });
 
-  // If no username provided, default to 'rick' for backward compatibility
+  // Default to 'rick' if no username provided (backward compat)
   const targetUsername = (username || 'rick').toLowerCase().trim();
 
   // Look up user by username
@@ -39,7 +39,13 @@ module.exports = async (req, res) => {
     return res.status(401).json({ error: 'Invalid username or PIN' });
   }
 
-  const hash = hashPin(pin, authRow.salt);
+  // Support both 'salt' and 'pin_salt' column names
+  const salt = authRow.salt || authRow.pin_salt;
+  if (!salt) {
+    return res.status(500).json({ error: 'Auth configuration error' });
+  }
+
+  const hash = hashPin(pin, salt);
   if (hash !== authRow.pin_hash) {
     return res.status(401).json({ error: 'Invalid username or PIN' });
   }
@@ -57,7 +63,7 @@ module.exports = async (req, res) => {
   return res.status(200).json({
     token,
     username: authRow.username,
-    display_name: authRow.display_name,
+    display_name: authRow.display_name || authRow.username,
     user_id: authRow.user_id
   });
 };
